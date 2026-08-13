@@ -1,0 +1,66 @@
+---
+import Base from "../layouts/Base.astro";
+---
+
+<Base title="nginx-astro — example site">
+  <h1>This page was served pre-compressed.</h1>
+
+  <p class="lede">
+    Your browser sent <code>Accept-Encoding</code> and nginx answered with a file
+    that was compressed once, at build time, at a level no request-time filter
+    would ever pay for.
+  </p>
+
+  <p>
+    Open the network panel and look at the response headers for this document.
+    You should see <code class="accent">content-encoding: br</code> — not
+    <code>zstd</code>, even though your browser almost certainly offered both.
+    That preference is set by the load order of the two modules in
+    <code>/etc/nginx/modules-enabled/</code>, and it is deliberate: brotli files
+    are smaller, and every zstd-capable browser also speaks brotli.
+  </p>
+
+  <h2>What the server does with each request</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Client sends</th>
+        <th>nginx serves</th>
+        <th>From</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>gzip, deflate, br, zstd</code></td>
+        <td><code class="accent">br</code></td>
+        <td><code>index.html.br</code></td>
+      </tr>
+      <tr>
+        <td><code>gzip, zstd</code></td>
+        <td><code>zstd</code></td>
+        <td><code>index.html.zst</code></td>
+      </tr>
+      <tr>
+        <td><code>gzip</code></td>
+        <td><code>gzip</code></td>
+        <td><code>index.html.gz</code></td>
+      </tr>
+      <tr>
+        <td>nothing</td>
+        <td>identity</td>
+        <td><code>index.html</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Try it yourself</h2>
+
+  <pre><code>curl -sI -H 'Accept-Encoding: gzip, deflate, br, zstd' \
+  http://localhost:8080/ | grep -i content-encoding</code></pre>
+
+  <p>
+    <a href="/does-not-exist">Follow a broken link</a> to see the 404 page, which
+    is served with a real 404 status rather than a 200.
+  </p>
+</Base>

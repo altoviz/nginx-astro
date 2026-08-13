@@ -1,0 +1,15 @@
+---
+import Base from "../layouts/Base.astro";
+---
+
+<Base title="404 — not found">
+  <h1>404</h1>
+  <p class="lede">No page at that address.</p>
+  <p>
+    nginx served this via <code>error_page 404 /404.html</code>, so the response
+    carries a real <code>404</code> status. The location is marked
+    <code>internal</code>, which is why <code>/404.html</code> is not reachable
+    as a URL of its own.
+  </p>
+  <p><a href="/">Back to the start</a></p>
+</Base>

@@ -1,0 +1,307 @@
+name: CI
+
+# Build, test and publish nginx-astro for both nginx lines to Docker Hub and GHCR.
+#
+# Required repository secrets:
+#   DOCKERHUB_USERNAME   Docker Hub account with push rights on altoviz/nginx-astro
+#   DOCKERHUB_TOKEN      Docker Hub access token (Read/Write/Delete scope)
+# GHCR needs no secret — the built-in GITHUB_TOKEN is enough.
+#
+# The nginx patch version is resolved at run time from the Docker Hub tag API
+# rather than pinned in a file, so the weekly schedule picks up 1.30.5 the day
+# it lands with no PR to merge.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 04:17 UTC — rebuild against the newest nginx patch and the newest
+    # Alpine base, so published images do not rot between commits.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  DOCKERHUB_IMAGE: altoviz/nginx-astro
+  GHCR_IMAGE: ghcr.io/altoviz/nginx-astro
+
+jobs:
+  # ------------------------------------------------------------------ resolve
+  resolve:
+    name: Resolve nginx versions
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.v.outputs.matrix }}
+      stable: ${{ steps.v.outputs.stable }}
+      mainline: ${{ steps.v.outputs.mainline }}
+      date: ${{ steps.v.outputs.date }}
+    steps:
+      - name: Find the newest patch on each line
+        id: v
+        run: |
+          set -euo pipefail
+
+          # All *-alpine-slim tags, reduced to the X.Y.Z ones.
+          tags="$(
+            for page in 1 2 3; do
+              curl -fsSL "https://hub.docker.com/v2/repositories/library/nginx/tags?page_size=100&page=${page}&name=alpine-slim" \
+                | jq -r '.results[].name'
+            done | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-alpine-slim$' | sed 's/-alpine-slim$//' | sort -uV
+          )"
+
+          # nginx convention: even minor = stable, odd minor = mainline.
+          stable="$(echo "$tags"   | awk -F. '$2 % 2 == 0' | tail -n1)"
+          mainline="$(echo "$tags" | awk -F. '$2 % 2 == 1' | tail -n1)"
+
+          [ -n "$stable" ]   || { echo "could not resolve a stable version";   exit 1; }
+          [ -n "$mainline" ] || { echo "could not resolve a mainline version"; exit 1; }
+
+          echo "stable=$stable"     >> "$GITHUB_OUTPUT"
+          echo "mainline=$mainline" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+          echo "matrix=$(jq -cn --arg s "$stable" --arg m "$mainline" \
+            '[{line: "stable", version: $s}, {line: "mainline", version: $m}]')" >> "$GITHUB_OUTPUT"
+
+          echo "### Resolved nginx versions" >> "$GITHUB_STEP_SUMMARY"
+          echo "- stable: \`$stable\`"       >> "$GITHUB_STEP_SUMMARY"
+          echo "- mainline: \`$mainline\`"   >> "$GITHUB_STEP_SUMMARY"
+
+  # -------------------------------------------------------------------- build
+  # Native runners per architecture, not QEMU. Compiling brotli and nginx under
+  # emulation takes ~10x longer than the whole rest of the job.
+  build:
+    name: ${{ matrix.target.line }} / ${{ matrix.platform.arch }}
+    needs: resolve
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.resolve.outputs.matrix) }}
+        platform:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build once into the local daemon and actually exercise it before any
+      # registry sees it. A single-arch image is enough: the negotiation logic
+      # this test guards is architecture-independent, but a link error is not.
+      - name: Build for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: nginx-astro:test
+          build-args: NGINX_VERSION=${{ matrix.target.version }}
+          cache-from: type=gha,scope=${{ matrix.target.line }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target.line }}-${{ matrix.platform.arch }}
+
+      - name: Smoke test
+        run: ./test/smoke.sh nginx-astro:test
+
+      - name: Record image size
+        run: |
+          base=$(docker image inspect nginx:${{ matrix.target.version }}-alpine-slim \
+                   --format '{{.Size}}' 2>/dev/null || echo 0)
+          ours=$(docker image inspect nginx-astro:test --format '{{.Size}}')
+          echo "\`${{ matrix.target.line }}/${{ matrix.platform.arch }}\`: $((ours / 1000000)) MB" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push by digest only; the merge job attaches the human-readable tags to
+      # the manifest list. Tagging here would race the two architectures.
+      - name: Push by digest
+        if: github.event_name != 'pull_request'
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.platform.arch }}
+          build-args: |
+            NGINX_VERSION=${{ matrix.target.version }}
+            IMAGE_CREATED=${{ github.event.repository.updated_at }}
+            IMAGE_REVISION=${{ github.sha }}
+            IMAGE_VERSION=${{ matrix.target.version }}
+          outputs: |
+            type=image,name=${{ env.DOCKERHUB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+            type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.target.line }}-${{ matrix.platform.arch }}
+
+      # The filename *is* the digest; the merge job turns each one back into an
+      # image reference. Artifacts are already scoped per line and arch by name.
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/$(echo '${{ steps.push.outputs.digest }}' | cut -d: -f2)"
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: digests-${{ matrix.target.line }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------- merge
+  merge:
+    name: Publish ${{ matrix.target.line }}
+    needs: [resolve, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.target.line }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest` tracks stable, matching nginx's own recommendation for people
+      # who have not thought about which line they want.
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          v="${{ matrix.target.version }}"
+          minor="${v%.*}"
+          date="${{ needs.resolve.outputs.date }}"
+
+          if [ "${{ matrix.target.line }}" = "stable" ]; then
+            names="$v $minor stable latest $v-$date"
+          else
+            names="$v $minor mainline $v-$date"
+          fi
+
+          args=""
+          for n in $names; do
+            args="$args -t ${{ env.DOCKERHUB_IMAGE }}:$n -t ${{ env.GHCR_IMAGE }}:$n"
+          done
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+          echo "primary=${{ env.DOCKERHUB_IMAGE }}:$v" >> "$GITHUB_OUTPUT"
+          echo "Tags for \`${{ matrix.target.line }}\`: $names" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create manifest lists
+        run: |
+          set -euo pipefail
+          refs=""
+          for f in /tmp/digests/*; do
+            refs="$refs ${{ env.DOCKERHUB_IMAGE }}@sha256:$(basename "$f")"
+          done
+          [ -n "$refs" ] || { echo "no digests to merge"; exit 1; }
+          docker buildx imagetools create ${{ steps.tags.outputs.args }} $refs
+
+      - name: Verify the published manifest
+        id: verify
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${{ steps.tags.outputs.primary }}"
+          digest=$(docker buildx imagetools inspect "${{ steps.tags.outputs.primary }}" \
+                     --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v3
+
+      # Keyless signing: the signature is bound to this workflow's OIDC identity,
+      # so anyone can verify the image came from this repo without us holding a key.
+      - name: Sign both registries
+        env:
+          DIGEST: ${{ steps.verify.outputs.digest }}
+        run: |
+          cosign sign --yes "${{ env.DOCKERHUB_IMAGE }}@${DIGEST}"
+          cosign sign --yes "${{ env.GHCR_IMAGE }}@${DIGEST}"
+
+  # --------------------------------------------------------------------- scan
+  scan:
+    name: Scan ${{ matrix.target.line }}
+    needs: [resolve, merge]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    steps:
+      - name: Trivy
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          image-ref: ${{ env.DOCKERHUB_IMAGE }}:${{ matrix.target.version }}
+          format: sarif
+          output: trivy-${{ matrix.target.line }}.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.target.line }}.sarif
+          category: trivy-${{ matrix.target.line }}
+
+  # ----------------------------------------------------------------- describe
+  # Keeps the Docker Hub page and README.md from drifting apart.
+  describe:
+    name: Sync Docker Hub description
+    needs: merge
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_IMAGE }}
+          short-description: "Slim nginx with Brotli + Zstandard, for pre-compressed Astro builds"
+          readme-filepath: ./README.md
