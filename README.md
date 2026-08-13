@@ -133,11 +133,8 @@ RUN cd /etc/nginx/modules-enabled \
 
 Pin `1.30.4-20260813` for reproducible deploys. Use `1.30` to pick up patch releases and rebuilds automatically.
 
-Every tag is published to both registries:
-
 ```console
 docker pull altoviz/nginx-astro:stable
-docker pull ghcr.io/altoviz/nginx-astro:stable
 ```
 
 CI rebuilds weekly against the newest nginx patch and the newest Alpine base, so a published tag never quietly rots between commits.
@@ -242,7 +239,6 @@ checks the negotiation for every combination and says which one disagreed:
 |---|---|
 | 📦 **Source code** | [github.com/altoviz/nginx-astro](https://github.com/altoviz/nginx-astro) |
 | 🐳 **Docker Hub** | [altoviz/nginx-astro](https://hub.docker.com/r/altoviz/nginx-astro) |
-| 📚 **GitHub Container Registry** | [`ghcr.io/altoviz/nginx-astro`](https://github.com/altoviz/nginx-astro/packages) — same manifest, mirrored |
 | ⚙️ **Build pipeline** | [Actions](https://github.com/altoviz/nginx-astro/actions/workflows/ci.yml) — every image is built and tested here |
 | 🌍 **Altoviz** | [altoviz.com](https://altoviz.com) — invoicing and accounting for small French businesses |
 | 📖 **Altoviz docs** | [docs.altoviz.com](https://docs.altoviz.com) |

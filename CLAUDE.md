@@ -11,6 +11,11 @@ from one `Dockerfile` — stable and mainline — for `linux/amd64` and `linux/a
 
 Published to `docker.io/altoviz/nginx-astro` and mirrored to `ghcr.io/altoviz/nginx-astro`.
 
+**The GHCR mirror is private and undocumented on purpose.** CI still publishes it, but the
+README does not mention it, because an anonymous `docker pull ghcr.io/...` is denied and the
+package page 404s. Do not "fix" the README by adding GHCR back — make the package public first
+(see [CI notes](#ci-notes)), then re-add the pull command under Tags and a row under Links.
+
 ## The one thing that must never regress
 
 **Brotli must win over zstd** when a browser sends `Accept-Encoding: gzip, deflate, br, zstd`.
@@ -119,9 +124,10 @@ commit links in the README's module table at the same time.
 - Builds run on **native runners** (`ubuntu-24.04` and `ubuntu-24.04-arm`), never QEMU —
   compiling brotli under emulation is roughly 10× slower.
 - Required secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`. GHCR uses the built-in token.
-- GHCR **package visibility is UI-only** — there is no REST endpoint. If a fresh package
-  publishes private, flip it at
-  `https://github.com/orgs/altoviz/packages/container/nginx-astro/settings`.
+- GHCR **package visibility is UI-only** — there is no REST endpoint, so this cannot be scripted.
+  The package is currently **private**; to publish it, flip visibility at
+  `https://github.com/orgs/altoviz/packages/container/nginx-astro/settings` and only then
+  document GHCR in the README.
 - Signing is keyless cosign via OIDC; the identity is
   `https://github.com/altoviz/nginx-astro/.github/workflows/ci.yml@refs/heads/main`.
 
