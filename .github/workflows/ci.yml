@@ -49,13 +49,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          # All *-alpine-slim tags, reduced to the X.Y.Z ones.
-          tags="$(
-            for page in 1 2 3; do
-              curl -fsSL "https://hub.docker.com/v2/repositories/library/nginx/tags?page_size=100&page=${page}&name=alpine-slim" \
-                | jq -r '.results[].name'
-            done | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-alpine-slim$' | sed 's/-alpine-slim$//' | sort -uV
-          )"
+          # Walk the tag list via .next rather than guessing a page count:
+          # Docker Hub returns 404 (not an empty page) past the end of a
+          # filtered result set, which `curl -f` turns into a failed job.
+          url="https://hub.docker.com/v2/repositories/library/nginx/tags?page_size=100&name=alpine-slim"
+          raw=""
+          for _ in $(seq 1 10); do
+            [ -n "$url" ] && [ "$url" != "null" ] || break
+            body="$(curl -fsSL "$url")"
+            raw="${raw}$(printf '%s' "$body" | jq -r '.results[].name')"$'\n'
+            url="$(printf '%s' "$body" | jq -r '.next')"
+          done
+
+          # Keep only the concrete X.Y.Z tags; drop stable/mainline/1/1.30 aliases.
+          tags="$(printf '%s' "$raw" \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-alpine-slim$' \
+            | sed 's/-alpine-slim$//' | sort -uV)"
 
           # nginx convention: even minor = stable, odd minor = mainline.
           stable="$(echo "$tags"   | awk -F. '$2 % 2 == 0' | tail -n1)"
