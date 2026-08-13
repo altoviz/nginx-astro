@@ -91,9 +91,10 @@ jobs:
     name: ${{ matrix.target.line }} / ${{ matrix.platform.arch }}
     needs: resolve
     runs-on: ${{ matrix.platform.runner }}
+    # No packages: write — this job only pushes to Docker Hub now; GHCR is
+    # written by the merge job.
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -137,16 +138,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Push by digest only; the merge job attaches the human-readable tags to
-      # the manifest list. Tagging here would race the two architectures.
+      # Push by digest to ONE registry only, and mirror to GHCR at merge time.
+      #
+      # Exporting to two registries here does not work with attestations: SLSA
+      # provenance embeds the target image reference, so docker.io and ghcr.io
+      # get different attestation manifests and therefore different wrapping
+      # indexes — while `outputs.digest` reports only the last export's. The
+      # merge job then asks Docker Hub for a digest that exists only on GHCR
+      # and fails with "not found". One registry, one unambiguous digest.
+      #
+      # No tags here either: tagging per-architecture would have amd64 and
+      # arm64 race to own the same tag.
       - name: Push by digest
         if: github.event_name != 'pull_request'
         id: push
@@ -159,9 +161,7 @@ jobs:
             IMAGE_CREATED=${{ github.event.repository.updated_at }}
             IMAGE_REVISION=${{ github.sha }}
             IMAGE_VERSION=${{ matrix.target.version }}
-          outputs: |
-            type=image,name=${{ env.DOCKERHUB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-            type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.DOCKERHUB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=${{ matrix.target.line }}-${{ matrix.platform.arch }}
@@ -232,15 +232,18 @@ jobs:
             names="$v $minor mainline $v-$date"
           fi
 
-          args=""
+          dh=""; ghcr=""
           for n in $names; do
-            args="$args -t ${{ env.DOCKERHUB_IMAGE }}:$n -t ${{ env.GHCR_IMAGE }}:$n"
+            dh="$dh -t ${{ env.DOCKERHUB_IMAGE }}:$n"
+            ghcr="$ghcr -t ${{ env.GHCR_IMAGE }}:$n"
           done
-          echo "args=$args" >> "$GITHUB_OUTPUT"
+          echo "dockerhub=$dh" >> "$GITHUB_OUTPUT"
+          echo "ghcr=$ghcr"    >> "$GITHUB_OUTPUT"
           echo "primary=${{ env.DOCKERHUB_IMAGE }}:$v" >> "$GITHUB_OUTPUT"
           echo "Tags for \`${{ matrix.target.line }}\`: $names" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Create manifest lists
+      # Join the per-architecture digests into one manifest list per tag.
+      - name: Create manifest lists on Docker Hub
         run: |
           set -euo pipefail
           refs=""
@@ -248,27 +251,44 @@ jobs:
             refs="$refs ${{ env.DOCKERHUB_IMAGE }}@sha256:$(basename "$f")"
           done
           [ -n "$refs" ] || { echo "no digests to merge"; exit 1; }
-          docker buildx imagetools create ${{ steps.tags.outputs.args }} $refs
+          docker buildx imagetools create ${{ steps.tags.outputs.dockerhub }} $refs
 
-      - name: Verify the published manifest
+      # GHCR is a mirror of the finished article, copied across registries by
+      # digest. The provenance attestation still names docker.io, since that is
+      # genuinely where these bytes were built and pushed.
+      - name: Mirror to GHCR
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create ${{ steps.tags.outputs.ghcr }} \
+            "${{ steps.tags.outputs.primary }}"
+
+      # Read each registry's digest back rather than assuming they match: an
+      # index copied between registries need not be byte-identical, and signing
+      # a digest the registry does not hold produces a signature nobody can
+      # verify.
+      - name: Verify the published manifests
         id: verify
         run: |
           set -euo pipefail
           docker buildx imagetools inspect "${{ steps.tags.outputs.primary }}"
-          digest=$(docker buildx imagetools inspect "${{ steps.tags.outputs.primary }}" \
-                     --format '{{json .Manifest.Digest}}' | tr -d '"')
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+          dh=$(docker buildx imagetools inspect "${{ steps.tags.outputs.primary }}" \
+                 --format '{{json .Manifest.Digest}}' | tr -d '"')
+          gh=$(docker buildx imagetools inspect "${{ env.GHCR_IMAGE }}:${{ matrix.target.version }}" \
+                 --format '{{json .Manifest.Digest}}' | tr -d '"')
+
+          echo "dockerhub_digest=$dh" >> "$GITHUB_OUTPUT"
+          echo "ghcr_digest=$gh"      >> "$GITHUB_OUTPUT"
 
       - uses: sigstore/cosign-installer@v3
 
       # Keyless signing: the signature is bound to this workflow's OIDC identity,
       # so anyone can verify the image came from this repo without us holding a key.
       - name: Sign both registries
-        env:
-          DIGEST: ${{ steps.verify.outputs.digest }}
         run: |
-          cosign sign --yes "${{ env.DOCKERHUB_IMAGE }}@${DIGEST}"
-          cosign sign --yes "${{ env.GHCR_IMAGE }}@${DIGEST}"
+          set -euo pipefail
+          cosign sign --yes "${{ env.DOCKERHUB_IMAGE }}@${{ steps.verify.outputs.dockerhub_digest }}"
+          cosign sign --yes "${{ env.GHCR_IMAGE }}@${{ steps.verify.outputs.ghcr_digest }}"
 
   # --------------------------------------------------------------------- scan
   scan:
