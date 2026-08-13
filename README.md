@@ -10,7 +10,7 @@
 [![nginx](https://img.shields.io/docker/v/altoviz/nginx-astro/stable?logo=nginx&logoColor=white&label=nginx)](https://hub.docker.com/r/altoviz/nginx-astro/tags)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-[Quick start](#quick-start) · [What's inside](#whats-inside) · [Encoding precedence](#encoding-precedence) · [Tags](#tags) · [Full example](#full-example) · [Verifying](#verifying-the-image)
+[Quick start](#quick-start) · [What's inside](#whats-inside) · [Encoding precedence](#encoding-precedence) · [Tags](#tags) · [Full example](#full-example) · [Verifying](#verifying-the-image) · [Getting help](#getting-help) · [Links](#links)
 
 </div>
 
@@ -200,6 +200,64 @@ docker build --build-arg NGINX_VERSION=1.30.4 -t nginx-astro:stable .
 ```
 
 `NGINX_VERSION`, `NGX_BROTLI_SHA` and `ZSTD_MODULE_SHA` are all build args — bumping a module is a one-line change.
+
+## Getting help
+
+| | |
+|---|---|
+| 🐛 **Something broken, or an idea?** | [Open an issue](https://github.com/altoviz/nginx-astro/issues/new) — bugs, feature requests and questions all welcome |
+| 🔎 **Check first** | [Existing issues](https://github.com/altoviz/nginx-astro/issues?q=is%3Aissue) — open and closed |
+| 🔒 **Security vulnerability** | [Report it privately](https://github.com/altoviz/nginx-astro/security/advisories/new) — please don't open a public issue |
+
+### Filing an issue that gets fixed quickly
+
+Most reports about this image come down to one of three things, and all three are quick to
+diagnose if you paste the following:
+
+```console
+# 1. Exactly which image — the tag alone is not enough, most are rolling
+docker image inspect <image> --format '{{index .RepoDigests 0}}{{"\n"}}{{.Os}}/{{.Architecture}}'
+
+# 2. What nginx thinks it is running
+docker run --rm <image> nginx -V 2>&1 | head -1
+
+# 3. Whether the modules load at all
+docker run --rm <image> nginx -t
+```
+
+Plus your `nginx.conf` — or at minimum **its first line**. If nginx exits with
+`unknown directive "brotli_static"`, that is the whole answer: the config is missing
+`include /etc/nginx/modules-enabled/*.conf;`. See [Quick start](#quick-start).
+
+If the problem is *which* encoding gets served, run the test suite and paste its output — it
+checks the negotiation for every combination and says which one disagreed:
+
+```console
+./test/smoke.sh <image>
+```
+
+## Links
+
+| | |
+|---|---|
+| 📦 **Source code** | [github.com/altoviz/nginx-astro](https://github.com/altoviz/nginx-astro) |
+| 🐳 **Docker Hub** | [altoviz/nginx-astro](https://hub.docker.com/r/altoviz/nginx-astro) |
+| 📚 **GitHub Container Registry** | [`ghcr.io/altoviz/nginx-astro`](https://github.com/altoviz/nginx-astro/packages) — same manifest, mirrored |
+| ⚙️ **Build pipeline** | [Actions](https://github.com/altoviz/nginx-astro/actions/workflows/ci.yml) — every image is built and tested here |
+| 🌍 **Altoviz** | [altoviz.com](https://altoviz.com) — invoicing and accounting for small French businesses |
+| 📖 **Altoviz docs** | [docs.altoviz.com](https://docs.altoviz.com) |
+| 🧑‍💻 **Altoviz Developer Hub** | [developer.altoviz.com](https://developer.altoviz.com) — API reference and guides |
+
+### Upstream projects
+
+This image is a small amount of glue around other people's work. If your problem is with
+compression behaviour itself rather than with how this image packages it, these are the right
+places to look:
+
+- [nginx](https://nginx.org) — the server, and its [security advisories](https://nginx.org/en/security_advisories.html)
+- [google/ngx_brotli](https://github.com/google/ngx_brotli) — the Brotli modules
+- [tokers/zstd-nginx-module](https://github.com/tokers/zstd-nginx-module) — the Zstandard modules
+- [sondr3/astro-compressor](https://github.com/sondr3/astro-compressor) — what writes the `.br`/`.zst`/`.gz` files this image serves
 
 ## Licence
 
